@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -c \"Expand-Archive -Path ''2026 学年留任谈话记录表.docx'' -DestinationPath ''extracted'' -Force\")",
+      "Bash(node create_interview_doc.js)",
+      "Bash(npm init:*)"
+    ]
+  }
+}

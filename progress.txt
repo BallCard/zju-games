@@ -1,0 +1,20 @@
+﻿# Project Progress
+
+## COMPLETED
+- [x] Product scope and constraints confirmed (ZJU students, 2-3 min session, light failure, no ads, anonymous profile)
+- [x] Canonical docs initialized (PRD/flow/tech/frontend/backend/plan)
+- [x] Session rule files initialized (CLAUDE.md, lessons.md)
+- [x] Phase 1.1 Monorepo scaffold and directory layout
+- [x] Frontend skeleton with React + Vite + PixiJS + Tailwind
+- [x] Backend skeleton with Nest-like modular structure and anonymous auth placeholder
+
+## IN PROGRESS
+- [ ] Define first merge-rule parameter table and balancing baseline
+
+## NEXT
+- [ ] Implement merge board core loop and session state machine
+- [ ] Add real HTTP server bootstrap for backend modules
+- [ ] Add leaderboard schema and persistence layer (PostgreSQL + Prisma)
+
+## KNOWN BUGS
+- [ ] None
