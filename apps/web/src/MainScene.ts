@@ -1,25 +1,31 @@
-import Phaser from 'phaser';
+﻿import Phaser from 'phaser';
 import {
   BASE_ELEMENT_DENSITY,
   COMBO_WINDOW_MS,
   DANGER_LINE_RATIO,
+  DEFAULT_CAT_ART_PACK,
   DROP_LEVEL_UNLOCK_SCORES,
   ELEMENT_DENSITY_DECAY_FACTOR,
   FAILURE_GRACE_MS,
   ZJU_ELEMENTS,
+  getCatArtPack,
+  getDefaultVariantForLevel,
+  getVariantById,
+  getVariantsForLevel,
+  type CatArtPackId,
+  type CatVariantConfig,
   type MatterFeelPreset,
 } from './GameConfig';
 
-type MatterImage = Phaser.Physics.Matter.Image;
+type MatterImage = Phaser.Physics.Matter.Sprite;
 type ActiveProp = 'none' | 'hammer' | 'bomb';
 type ComboTheme = 'pixel' | 'neon' | 'campus';
+type CatRenderTheme = 'transparent' | 'cream-card';
 
 interface MergeRequest {
-  a: MatterImage;
-  b: MatterImage;
+  bodyA: MatterJS.BodyType;
+  bodyB: MatterJS.BodyType;
   nextLevel: number;
-  x: number;
-  y: number;
 }
 
 interface GameOverPayload {
@@ -27,6 +33,12 @@ interface GameOverPayload {
   reason: 'danger_line';
   maxLevel: number;
   mergeCount: number;
+}
+
+interface QueuedElementState {
+  level: number;
+  name: string;
+  variant: CatVariantConfig;
 }
 
 type DangerLevel = 'READY' | 'WARNING' | 'DANGER' | 'CRITICAL';
@@ -37,8 +49,18 @@ const DROP_SPAWN_Y = 60;
 const PROP_IMMUNITY_MS = 2000;
 const BOMB_KILL_RADIUS = 82;
 const BOMB_PUSH_RADIUS = 170;
+const SHAKE_MAX_SPEED_X = 7.5;
+const SHAKE_MAX_SPEED_Y_UP = -10.5;
+const SHAKE_MAX_SPEED_Y_DOWN = 12;
+const SHAKE_COOLDOWN_MS = 650;
 
-const LEVEL_COLORS = [
+const PILOT_VARIANT_BADGES: Record<string, string> = {
+  'cat-l10-memev1-1': 'P10',
+  'cat-l11-memev1-1': 'P11',
+  'cat-l12-memev1-1': 'P12',
+};
+
+const FALLBACK_CAT_COLORS = [
   0x7dd3fc,
   0x60a5fa,
   0x818cf8,
@@ -57,7 +79,7 @@ export default class MainScene extends Phaser.Scene {
   private currentScore = 0;
   private maxLevelReached = 1;
   private mergeCount = 0;
-  private queuedElementType: string | null = null;
+  private queuedElement: QueuedElementState | null = null;
   private currentComboCount = 0;
   private lastMergeTimestamp = 0;
   private lastSpawnDensity = 0;
@@ -71,6 +93,9 @@ export default class MainScene extends Phaser.Scene {
   private propImmunityTimer = 0;
 
   private comboTheme: ComboTheme = 'pixel';
+  private catRenderTheme: CatRenderTheme = 'cream-card';
+  private catArtPackId: CatArtPackId = DEFAULT_CAT_ART_PACK;
+  private lastVariantByLevel: Record<number, string | undefined> = {};
   private comboFlashOverlay?: Phaser.GameObjects.Rectangle;
   private gameOverBanner?: Phaser.GameObjects.Container;
   private gameOverBannerDismissAt = 0;
@@ -83,24 +108,33 @@ export default class MainScene extends Phaser.Scene {
 
   private isAiming = false;
   private aimX = 0;
-  private aimPreview?: Phaser.GameObjects.Image;
+  private aimPreview?: Phaser.GameObjects.Sprite;
+  private aimPreviewShell?: Phaser.GameObjects.Arc;
+  private aimPreviewBadge?: Phaser.GameObjects.Text;
   private aimGuide?: Phaser.GameObjects.Graphics;
+  private pendingMerges: MergeRequest[] = [];
+  private shakeCooldownUntil = 0;
 
   constructor() {
     super('MainScene');
   }
 
   preload() {
-    this.createPlaceholderTextures();
+    this.loadCatSourceTextures();
   }
 
   create() {
+    this.resetRuntimeState();
+
     const w = this.scale.width;
     const h = this.scale.height;
     this.worldRight = w - 16;
     this.spawnZoneY = Math.floor(h * DANGER_LINE_RATIO);
 
-    this.matter.world.setBounds(this.worldLeft, 16, w - 32, h - 32);
+    this.cameras.main.setBackgroundColor('#FDF5E6');
+    this.buildCatTextures();
+
+    this.createStaticBounds(w, h);
 
     this.dangerLine = this.add.rectangle(w / 2, this.spawnZoneY, w - 24, 2, 0xef4444, 0.75);
     this.dangerLine.setOrigin(0.5, 0.5);
@@ -121,6 +155,10 @@ export default class MainScene extends Phaser.Scene {
     this.game.events.on('zju:activatePropHammer', this.activatePropHammer, this);
     this.game.events.on('zju:activatePropBomb', this.activatePropBomb, this);
     this.game.events.on('zju:setComboTheme', this.setComboTheme, this);
+    this.game.events.on('zju:setCatRenderTheme', this.setCatRenderTheme, this);
+    this.game.events.on('zju:setCatArtPack', this.setCatArtPack, this);
+    this.game.events.on('zju:forceVariantPreview', this.forceVariantPreview, this);
+    this.game.events.on('zju:spawnVariantPilot', this.spawnVariantPilot, this);
     this.game.events.on('zju:forceGameOver', this.forceGameOver, this);
 
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
@@ -135,6 +173,10 @@ export default class MainScene extends Phaser.Scene {
       this.game.events.off('zju:activatePropHammer', this.activatePropHammer, this);
       this.game.events.off('zju:activatePropBomb', this.activatePropBomb, this);
       this.game.events.off('zju:setComboTheme', this.setComboTheme, this);
+      this.game.events.off('zju:setCatRenderTheme', this.setCatRenderTheme, this);
+      this.game.events.off('zju:setCatArtPack', this.setCatArtPack, this);
+      this.game.events.off('zju:forceVariantPreview', this.forceVariantPreview, this);
+      this.game.events.off('zju:spawnVariantPilot', this.spawnVariantPilot, this);
       this.game.events.off('zju:forceGameOver', this.forceGameOver, this);
 
       this.clearAimVisuals();
@@ -154,7 +196,49 @@ export default class MainScene extends Phaser.Scene {
     this.emitDebugState();
   }
 
+  private resetRuntimeState() {
+    this.currentScore = 0;
+    this.maxLevelReached = 1;
+    this.mergeCount = 0;
+    this.queuedElement = null;
+    this.currentComboCount = 0;
+    this.lastMergeTimestamp = 0;
+    this.lastSpawnDensity = 0;
+    this.isGameOver = false;
+    this.dangerTimer = 0;
+    this.isInDanger = false;
+    this.canDrop = true;
+    this.activeProp = 'none';
+    this.propImmunityTimer = 0;
+    this.isAiming = false;
+    this.aimX = 0;
+    this.pendingMerges = [];
+    this.shakeCooldownUntil = 0;
+    this.catRenderTheme = 'cream-card';
+    this.catArtPackId = DEFAULT_CAT_ART_PACK;
+    this.lastVariantByLevel = {};
+  }
+  private createStaticBounds(width: number, height: number) {
+    const wallThickness = 32;
+    const groundThickness = 48;
+
+    this.matter.add.rectangle(this.worldLeft / 2, height / 2, wallThickness, height, {
+      isStatic: true,
+      label: 'wall-left',
+    });
+
+    this.matter.add.rectangle(width - this.worldLeft / 2, height / 2, wallThickness, height, {
+      isStatic: true,
+      label: 'wall-right',
+    });
+
+    this.matter.add.rectangle(width / 2, height - 16, width - 16, groundThickness, {
+      isStatic: true,
+      label: 'ground',
+    });
+  }
   update(_time: number, delta: number) {
+    // Keep per-frame work focused on visual overlays only.
     this.syncElementLabels();
 
     if (this.isGameOver) return;
@@ -163,6 +247,8 @@ export default class MainScene extends Phaser.Scene {
       this.propImmunityTimer = Math.max(0, this.propImmunityTimer - delta);
       this.isInDanger = false;
       this.dangerTimer = 0;
+      this.processPendingMerges();
+      this.containDynamicElements();
       this.updateDangerUI();
       this.emitDangerState();
       this.emitDebugState();
@@ -184,6 +270,8 @@ export default class MainScene extends Phaser.Scene {
       this.isInDanger = false;
     }
 
+    this.processPendingMerges();
+    this.containDynamicElements();
     this.updateDangerUI();
     this.emitDangerState();
     this.emitDebugState();
@@ -200,7 +288,9 @@ export default class MainScene extends Phaser.Scene {
 
   public usePropShake() {
     if (this.isGameOver) return;
+    if (this.time.now < this.shakeCooldownUntil) return;
 
+    this.shakeCooldownUntil = this.time.now + SHAKE_COOLDOWN_MS;
     this.propImmunityTimer = PROP_IMMUNITY_MS;
 
     const Body = (Phaser.Physics.Matter as any).Matter.Body;
@@ -210,6 +300,10 @@ export default class MainScene extends Phaser.Scene {
         x: Phaser.Math.FloatBetween(-0.023, 0.023),
         y: Phaser.Math.FloatBetween(-0.075, -0.04),
       });
+
+      const vx = Phaser.Math.Clamp(body.velocity.x, -SHAKE_MAX_SPEED_X, SHAKE_MAX_SPEED_X);
+      const vy = Phaser.Math.Clamp(body.velocity.y, SHAKE_MAX_SPEED_Y_UP, SHAKE_MAX_SPEED_Y_DOWN);
+      Body.setVelocity(body, { x: vx, y: vy });
     }
 
     this.game.events.emit('zju:propUsed', { prop: 'shake' });
@@ -240,7 +334,123 @@ export default class MainScene extends Phaser.Scene {
     }
   }
 
+  public setCatRenderTheme(payload?: { theme?: CatRenderTheme }) {
+    const theme = payload?.theme;
+    if (theme !== 'transparent' && theme !== 'cream-card') return;
+    if (this.catRenderTheme === theme) return;
+
+    this.catRenderTheme = theme;
+    this.rebuildCatTexturesForTheme();
+    this.emitDebugState();
+  }
+
+  public setCatArtPack(payload?: { packId?: CatArtPackId }) {
+    const packId = payload?.packId;
+    if (!packId || this.catArtPackId === packId) return;
+
+    this.catArtPackId = packId;
+    this.lastVariantByLevel = {};
+    this.rebuildCatTexturesForTheme();
+
+    const children = this.children.list as Phaser.GameObjects.GameObject[];
+    for (const child of children) {
+      const obj = child as unknown as MatterImage;
+      if (!obj?.active || !obj.body || !obj.getData) continue;
+
+      const level = Number(obj.getData('level'));
+      if (!Number.isFinite(level)) continue;
+
+      const nextVariant = this.buildQueuedElement(level).variant;
+      obj.setData('variantId', nextVariant.id);
+      obj.setData('sourceFile', nextVariant.sourceFile);
+      obj.setData('variantKind', nextVariant.kind);
+      this.applyVariantVisual(obj, level, nextVariant);
+    }
+
+    if (this.queuedElement) {
+      this.queuedElement = this.buildQueuedElement(this.queuedElement.level);
+      const payload = {
+        level: this.queuedElement.level,
+        name: this.queuedElement.name,
+        variantId: this.queuedElement.variant.id,
+        sourceFile: this.queuedElement.variant.sourceFile,
+        previewSrc: this.getVariantPreviewSrc(this.queuedElement.variant),
+        kind: this.queuedElement.variant.kind,
+      };
+      this.events.emit('nextElementChanged', payload);
+      this.game.events.emit('zju:nextElementChanged', payload);
+    }
+
+    this.emitDebugState();
+  }
+
+  private rebuildCatTexturesForTheme() {
+    this.buildCatTextures();
+
+    const children = this.children.list as Phaser.GameObjects.GameObject[];
+    for (const child of children) {
+      const obj = child as unknown as MatterImage;
+      if (!obj?.active || !obj.body || !obj.getData) continue;
+
+      const variantId = String(obj.getData('variantId') ?? '');
+      if (!variantId) continue;
+
+      const level = Number(obj.getData('level'));
+      if (!Number.isFinite(level)) continue;
+      const variant = this.getVariantByIdOrFallback(level, variantId);
+      this.applyVariantVisual(obj, level, variant);
+    }
+
+    if (this.aimPreview && this.queuedElement) {
+      const radius = this.getElementConfig(this.queuedElement.level).radius;
+      this.applyVariantVisual(this.aimPreview, this.queuedElement.level, this.queuedElement.variant);
+    }
+  }
+  public forceVariantPreview(payload?: { level?: number; variantId?: string }) {
+    const level = Number(payload?.level);
+    const variantId = String(payload?.variantId ?? '');
+    if (!Number.isFinite(level) || level < 1 || level > MAX_LEVEL || !variantId) return;
+
+    const variant = this.getVariantByIdOrFallback(level, variantId);
+    this.queuedElement = {
+      level,
+      name: this.getElementConfig(level).name,
+      variant,
+    };
+    this.lastVariantByLevel[level] = variant.id;
+
+    const nextPayload = {
+      level,
+      name: this.queuedElement.name,
+      variantId: variant.id,
+      sourceFile: variant.sourceFile,
+      previewSrc: this.getVariantPreviewSrc(variant),
+      kind: variant.kind,
+    };
+
+    this.events.emit('nextElementChanged', nextPayload);
+    this.game.events.emit('zju:nextElementChanged', nextPayload);
+    if (this.isAiming) {
+      this.renderAimVisuals();
+    }
+    this.emitDebugState();
+  }
+
+  public spawnVariantPilot(payload?: { level?: number; variantId?: string }) {
+    if (this.isGameOver) return;
+    const level = Number(payload?.level);
+    const variantId = String(payload?.variantId ?? '');
+    if (!Number.isFinite(level) || level < 1 || level > MAX_LEVEL || !variantId) return;
+
+    const variant = this.getVariantByIdOrFallback(level, variantId);
+    const x = Phaser.Math.Clamp(this.scale.width * 0.5, this.worldLeft + this.getElementConfig(level).radius, this.worldRight - this.getElementConfig(level).radius);
+    const spawned = this.spawnElement(level, x, DROP_SPAWN_Y + 8, undefined, variant);
+    spawned.setVelocity(0, 0.6);
+    this.emitDebugState();
+  }
+
   public forceGameOver() {
+
     if (this.isGameOver) return;
     this.finishGame('danger_line');
   }
@@ -259,7 +469,7 @@ export default class MainScene extends Phaser.Scene {
       return;
     }
 
-    if (!this.queuedElementType) return;
+    if (!this.queuedElement) return;
 
     this.isAiming = true;
     this.updateAim(pointer.x);
@@ -363,6 +573,30 @@ export default class MainScene extends Phaser.Scene {
     return true;
   }
 
+  private containDynamicElements() {
+    const Body = (Phaser.Physics.Matter as any).Matter.Body;
+    const minX = this.worldLeft + 6;
+    const maxX = this.worldRight - 6;
+    const minY = 8;
+    const maxY = this.scale.height - 18;
+
+    for (const obj of this.getSettledElements()) {
+      const body = obj.body as MatterJS.BodyType;
+      const radius = body.circleRadius ?? Number(obj.getData('radius')) ?? 0;
+      const clampedX = Phaser.Math.Clamp(body.position.x, minX + radius, maxX - radius);
+      const clampedY = Phaser.Math.Clamp(body.position.y, minY + radius, maxY - radius);
+
+      if (Math.abs(clampedX - body.position.x) > 0.5 || Math.abs(clampedY - body.position.y) > 0.5) {
+        Body.setPosition(body, { x: clampedX, y: clampedY });
+      }
+
+      const vx = Phaser.Math.Clamp(body.velocity.x, -SHAKE_MAX_SPEED_X, SHAKE_MAX_SPEED_X);
+      const vy = Phaser.Math.Clamp(body.velocity.y, SHAKE_MAX_SPEED_Y_UP, SHAKE_MAX_SPEED_Y_DOWN);
+      if (vx !== body.velocity.x || vy !== body.velocity.y) {
+        Body.setVelocity(body, { x: vx, y: vy });
+      }
+    }
+  }
   private getSettledElements(): MatterImage[] {
     const children = this.children.list as Phaser.GameObjects.GameObject[];
     const result: MatterImage[] = [];
@@ -402,9 +636,9 @@ export default class MainScene extends Phaser.Scene {
   }
 
   private updateAim(pointerX: number) {
-    if (!this.queuedElementType) return;
+    if (!this.queuedElement) return;
 
-    const queued = this.getElementConfigByTextureKey(this.queuedElementType);
+    const queued = this.getElementConfig(this.queuedElement.level);
     this.aimX = Phaser.Math.Clamp(
       pointerX,
       this.worldLeft + queued.radius,
@@ -413,16 +647,15 @@ export default class MainScene extends Phaser.Scene {
   }
 
   private commitDropFromAim() {
-    const queuedTexture = this.queuedElementType;
+    const queued = this.queuedElement;
     this.isAiming = false;
 
-    if (this.isGameOver || !this.canDrop || !queuedTexture) {
+    if (this.isGameOver || !this.canDrop || !queued) {
       this.clearAimVisuals();
       return;
     }
 
-    const queued = this.getElementConfigByTextureKey(queuedTexture);
-    this.spawnElement(queued.level, this.aimX, DROP_SPAWN_Y);
+    this.spawnElement(queued.level, this.aimX, DROP_SPAWN_Y, undefined, queued.variant);
 
     this.canDrop = false;
     this.time.delayedCall(DROP_COOLDOWN_MS, () => {
@@ -436,23 +669,23 @@ export default class MainScene extends Phaser.Scene {
   }
 
   private renderAimVisuals() {
-    const queuedTexture = this.queuedElementType;
-    if (!queuedTexture || !this.isAiming || this.activeProp !== 'none') {
+    const queued = this.queuedElement;
+    if (!queued || !this.isAiming || this.activeProp !== 'none') {
       this.clearAimVisuals();
       return;
     }
 
-    const queued = this.getElementConfigByTextureKey(queuedTexture);
+    const queuedCfg = this.getElementConfig(queued.level);
 
     if (!this.aimPreview) {
-      this.aimPreview = this.add.image(this.aimX, DROP_SPAWN_Y, queuedTexture);
+      this.aimPreview = this.add.sprite(this.aimX, DROP_SPAWN_Y, this.getRenderedTextureKey(queued.variant.id));
       this.aimPreview.setDepth(30);
       this.aimPreview.setAlpha(0.7);
     }
 
-    this.aimPreview.setTexture(queuedTexture);
-    this.aimPreview.setDisplaySize(queued.radius * 2, queued.radius * 2);
+    this.applyVariantVisual(this.aimPreview, queued.level, queued.variant);
     this.aimPreview.setPosition(this.aimX, DROP_SPAWN_Y);
+    this.syncPilotBadgeForPreview(queued.level, queued.variant.id);
 
     if (!this.aimGuide) {
       this.aimGuide = this.add.graphics();
@@ -460,7 +693,7 @@ export default class MainScene extends Phaser.Scene {
     }
 
     this.aimGuide.clear();
-    const startY = DROP_SPAWN_Y + queued.radius + 6;
+    const startY = DROP_SPAWN_Y + queuedCfg.radius + 6;
     const endY = Math.min(this.scale.height - 26, this.spawnZoneY + 28);
     const segment = 11;
     const gap = 8;
@@ -476,6 +709,7 @@ export default class MainScene extends Phaser.Scene {
   }
 
   private clearAimVisuals() {
+
     if (this.aimGuide) {
       this.aimGuide.destroy();
       this.aimGuide = undefined;
@@ -485,30 +719,384 @@ export default class MainScene extends Phaser.Scene {
       this.aimPreview.destroy();
       this.aimPreview = undefined;
     }
+    if (this.aimPreviewBadge) {
+      this.aimPreviewBadge.destroy();
+      this.aimPreviewBadge = undefined;
+    }
   }
 
-  private createPlaceholderTextures() {
-    for (const element of ZJU_ELEMENTS) {
-      if (this.textures.exists(element.textureKey)) continue;
+  private loadCatSourceTextures() {
+    const pack = this.getArtPack();
+    for (const variants of Object.values(pack.levelVariants)) {
+      for (const variant of variants) {
+        const textureKey = this.getCatSourceTextureKey(variant.id);
+        if (!this.textures.exists(textureKey)) {
+          this.load.image(textureKey, this.getVariantPreviewSrc(variant));
+        }
 
-      const size = element.radius * 2;
-      const g = this.add.graphics({ x: -9999, y: -9999 });
-      const color = LEVEL_COLORS[(element.level - 1) % LEVEL_COLORS.length];
-
-      g.fillStyle(color, 1);
-      g.fillCircle(element.radius, element.radius, element.radius);
-
-      g.lineStyle(2, 0x0f172a, 0.95);
-      g.strokeCircle(element.radius, element.radius, element.radius - 1);
-
-      const px = Math.max(2, Math.floor(size * 0.08));
-      g.fillStyle(0xffffff, 0.35);
-      g.fillRect(Math.floor(size * 0.28), Math.floor(size * 0.22), px * 2, px * 2);
-      g.fillRect(Math.floor(size * 0.44), Math.floor(size * 0.3), px, px);
-
-      g.generateTexture(element.textureKey, size, size);
-      g.destroy();
+        if (
+          variant.kind === 'animated-reserved' &&
+          variant.spritesheetKey &&
+          variant.frameConfig &&
+          !this.textures.exists(variant.spritesheetKey)
+        ) {
+          this.load.spritesheet(variant.spritesheetKey, '/assets/cats/' + (variant.spritesheetFile ?? variant.sourceFile), {
+            frameWidth: variant.frameConfig.frameWidth,
+            frameHeight: variant.frameConfig.frameHeight,
+          });
+        }
+      }
     }
+  }
+
+  private getArtPack() {
+    return getCatArtPack(this.catArtPackId);
+  }
+
+  private getVariantPreviewSrc(variant: CatVariantConfig) {
+    return `/assets/cats/${variant.previewFile ?? variant.sourceFile}`;
+  }
+
+  private getCatSourceTextureKey(variantId: string) {
+    return `cat-src-${variantId}`;
+  }
+
+  private getRenderedTextureKey(variantId: string, theme: CatRenderTheme = this.catRenderTheme) {
+    if (theme === 'transparent') {
+      return this.getCatSourceTextureKey(variantId);
+    }
+
+    return `${variantId}--${theme}`;
+  }
+
+  private getEffectiveRadius(level: number, variant?: CatVariantConfig) {
+    const baseRadius = this.getElementConfig(level).radius;
+    return variant?.physicsRadiusOverride ?? baseRadius;
+  }
+
+  private applyVariantVisual(target: Phaser.GameObjects.Image, level: number, variant: CatVariantConfig) {
+    const textureKey = this.getRenderedTextureKey(variant.id);
+    const physicsRadius = this.getEffectiveRadius(level, variant);
+    const visualRadius = variant.kind === 'animated-reserved' && this.catRenderTheme === 'cream-card' ? Math.round(physicsRadius * 0.72) : (variant.displayRadiusOverride ?? physicsRadius);
+
+    if ('stop' in target && typeof target.stop === 'function') {
+      target.stop();
+    }
+
+    target.setTexture(textureKey);
+    target.setDisplaySize(visualRadius * 2, visualRadius * 2);
+    this.syncAnimatedShell(target, physicsRadius, variant);
+
+    if (variant.kind === 'animated-reserved' && 'play' in target && typeof target.play === 'function') {
+      const didPrepare = this.ensureVariantAnimation(variant);
+      if (didPrepare && variant.animationKey) {
+        target.setTexture(variant.spritesheetKey ?? textureKey);
+        target.play(variant.animationKey, true);
+      }
+    }
+  }
+
+  private syncAnimatedShell(target: Phaser.GameObjects.Image, physicsRadius: number, variant: CatVariantConfig) {
+    const needsShell = this.catRenderTheme === 'cream-card' && variant.kind === 'animated-reserved';
+
+    if (target === this.aimPreview) {
+      if (!needsShell) {
+        if (this.aimPreviewShell) {
+          this.aimPreviewShell.destroy();
+          this.aimPreviewShell = undefined;
+        }
+        return;
+      }
+
+      if (!this.aimPreviewShell || !this.aimPreviewShell.active) {
+        this.aimPreviewShell = this.add.circle(target.x, target.y, physicsRadius, 0xfff7ed, 0.98);
+        this.aimPreviewShell.setStrokeStyle(Math.max(2, Math.floor(physicsRadius * 0.08)), 0xc08457, 0.4);
+        this.aimPreviewShell.setDepth(Math.max(0, target.depth - 1));
+      }
+
+      this.aimPreviewShell.setRadius(physicsRadius);
+      this.aimPreviewShell.setPosition(target.x, target.y);
+      this.aimPreviewShell.setDepth(Math.max(0, target.depth - 1));
+      return;
+    }
+
+    const dataTarget = target as Phaser.GameObjects.Image & { getData?: Function; setData?: Function; once?: Function };
+    if (!dataTarget.getData || !dataTarget.setData) return;
+
+    const existingShell = dataTarget.getData('shellRef') as Phaser.GameObjects.Arc | undefined;
+    if (!needsShell) {
+      if (existingShell?.active) {
+        existingShell.destroy();
+      }
+      dataTarget.setData('shellRef', null);
+      return;
+    }
+
+    let shell = existingShell;
+    if (!shell || !shell.active) {
+      shell = this.add.circle(target.x, target.y, physicsRadius, 0xfff7ed, 0.98);
+      shell.setStrokeStyle(Math.max(2, Math.floor(physicsRadius * 0.08)), 0xc08457, 0.4);
+      shell.setDepth(Math.max(0, target.depth - 1));
+      dataTarget.setData('shellRef', shell);
+      if (typeof dataTarget.once === 'function') {
+        dataTarget.once('destroy', () => {
+          const liveShell = dataTarget.getData?.('shellRef') as Phaser.GameObjects.Arc | undefined;
+          if (liveShell?.active) {
+            liveShell.destroy();
+          }
+        });
+      }
+    }
+
+    shell.setRadius(physicsRadius);
+    shell.setPosition(target.x, target.y);
+    shell.setDepth(Math.max(0, target.depth - 1));
+  }
+
+  private ensureVariantAnimation(variant: CatVariantConfig) {
+    if (variant.kind !== 'animated-reserved' || !variant.animationKey || !variant.spritesheetKey || !variant.frameConfig) {
+      return false;
+    }
+
+    if (!this.textures.exists(variant.spritesheetKey)) {
+      return false;
+    }
+
+    if (this.anims.exists(variant.animationKey)) {
+      return true;
+    }
+
+    this.anims.create({
+      key: variant.animationKey,
+      frames: this.anims.generateFrameNumbers(variant.spritesheetKey, {
+        start: variant.frameConfig.startFrame ?? 0,
+        end: variant.frameConfig.endFrame,
+      }),
+      frameRate: variant.frameConfig.frameRate ?? 12,
+      repeat: variant.frameConfig.repeat ?? -1,
+    });
+
+    return true;
+  }
+
+  private getLevelVariants(level: number) {
+    return getVariantsForLevel(level, this.catArtPackId);
+  }
+
+  private pickVariantForLevel(level: number, excludeVariantId?: string | null) {
+    const variants = this.getLevelVariants(level);
+    if (variants.length === 0) {
+      return getDefaultVariantForLevel(level, this.catArtPackId);
+    }
+
+    const filtered = variants.filter((variant) => variant.id !== excludeVariantId);
+    const pool = filtered.length > 0 ? filtered : variants;
+    const totalWeight = pool.reduce((sum, variant) => sum + (variant.weight ?? 1), 0);
+    let roll = Math.random() * Math.max(totalWeight, 0.0001);
+
+    for (const variant of pool) {
+      roll -= variant.weight ?? 1;
+      if (roll <= 0) {
+        return variant;
+      }
+    }
+
+    return pool[pool.length - 1];
+  }
+
+  private buildQueuedElement(level: number, excludeVariantId?: string | null): QueuedElementState {
+    const variant = this.pickVariantForLevel(level, excludeVariantId ?? this.lastVariantByLevel[level] ?? null);
+    this.lastVariantByLevel[level] = variant.id;
+    const cfg = this.getElementConfig(level);
+    return {
+      level,
+      name: cfg.name,
+      variant,
+    };
+  }
+
+  private buildCatTextures() {
+    if (this.catRenderTheme !== 'cream-card') {
+      return;
+    }
+
+    const pack = this.getArtPack();
+    for (const [levelText, variants] of Object.entries(pack.levelVariants)) {
+      const level = Number(levelText);
+      const cfg = this.getElementConfig(level);
+      for (const variant of variants) {
+        this.buildCatTexture(level, variant, this.getRenderedTextureKey(variant.id, 'cream-card'), cfg.radius);
+      }
+    }
+  }
+
+  private buildCatTexture(level: number, variant: CatVariantConfig, textureKey: string, radius: number) {
+    if (this.textures.exists(textureKey)) {
+      this.textures.remove(textureKey);
+    }
+
+    const sourceKey = this.getCatSourceTextureKey(variant.id);
+    if (!this.textures.exists(sourceKey)) {
+      this.ensureFallbackCatTexture(textureKey, radius, level);
+      return;
+    }
+
+    const sourceTexture = this.textures.get(sourceKey);
+    const sourceImage = sourceTexture.getSourceImage() as CanvasImageSource | undefined;
+    if (!sourceImage) {
+      this.ensureFallbackCatTexture(textureKey, radius, level);
+      return;
+    }
+
+    const width = Number((sourceImage as { width?: number }).width ?? 0);
+    const height = Number((sourceImage as { height?: number }).height ?? 0);
+    if (!width || !height) {
+      this.ensureFallbackCatTexture(textureKey, radius, level);
+      return;
+    }
+
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = width;
+    tempCanvas.height = height;
+    const tempCtx = tempCanvas.getContext('2d');
+    if (!tempCtx) {
+      this.ensureFallbackCatTexture(textureKey, radius, level);
+      return;
+    }
+
+    tempCtx.clearRect(0, 0, width, height);
+    tempCtx.drawImage(sourceImage, 0, 0, width, height);
+    const imageData = tempCtx.getImageData(0, 0, width, height).data;
+
+    let minX = width;
+    let minY = height;
+    let maxX = -1;
+    let maxY = -1;
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const alpha = imageData[(y * width + x) * 4 + 3];
+        if (alpha > 8) {
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+
+    if (maxX < minX || maxY < minY) {
+      this.ensureFallbackCatTexture(textureKey, radius, level);
+      return;
+    }
+
+    const trimWidth = maxX - minX + 1;
+    const trimHeight = maxY - minY + 1;
+    const diameter = radius * 2;
+    const padding = Math.max(3, Math.floor(diameter * 0.08));
+    const innerSize = diameter - padding * 2;
+    const scale = Math.min(innerSize / trimWidth, innerSize / trimHeight);
+    const drawWidth = Math.max(1, Math.round(trimWidth * scale));
+    const drawHeight = Math.max(1, Math.round(trimHeight * scale));
+    const offsetX = Math.round((diameter - drawWidth) / 2);
+    const offsetY = Math.round((diameter - drawHeight) / 2 + diameter * 0.02);
+    const accent = FALLBACK_CAT_COLORS[(level - 1) % FALLBACK_CAT_COLORS.length];
+    const r = (accent >> 16) & 255;
+    const g = (accent >> 8) & 255;
+    const b = accent & 255;
+
+    const canvasTexture = this.textures.createCanvas(textureKey, diameter, diameter);
+    if (!canvasTexture) {
+      this.ensureFallbackCatTexture(textureKey, radius, level);
+      return;
+    }
+
+    const ctx = canvasTexture.context;
+
+    ctx.clearRect(0, 0, diameter, diameter);
+
+    const bgGradient = ctx.createRadialGradient(
+      radius * 0.72,
+      radius * 0.62,
+      Math.max(2, radius * 0.18),
+      radius,
+      radius,
+      radius,
+    );
+    bgGradient.addColorStop(0, 'rgba(255,250,242,0.98)');
+    bgGradient.addColorStop(0.68, `rgba(${r}, ${g}, ${b}, 0.22)`);
+    bgGradient.addColorStop(1, 'rgba(245, 232, 212, 0.96)');
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(radius, radius, radius - 1, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.fillStyle = bgGradient;
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(radius, radius + radius * 0.08, radius * 0.82, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(120, 72, 24, 0.12)';
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(radius, radius, radius - 3, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.clip();
+    ctx.drawImage(sourceImage, minX, minY, trimWidth, trimHeight, offsetX, offsetY, drawWidth, drawHeight);
+    ctx.restore();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(radius, radius, radius - 1.5, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.lineWidth = Math.max(2, diameter * 0.035);
+    ctx.strokeStyle = 'rgba(122, 74, 31, 0.22)';
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(radius * 0.72, radius * 0.56, radius * 0.18, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.fill();
+    ctx.restore();
+
+    canvasTexture.refresh();
+  }
+
+  private ensureFallbackCatTexture(textureKey: string, radius: number, level: number) {
+    if (this.textures.exists(textureKey)) return;
+
+    const size = radius * 2;
+    const g = this.add.graphics({ x: -9999, y: -9999 });
+    const color = FALLBACK_CAT_COLORS[(level - 1) % FALLBACK_CAT_COLORS.length];
+
+    g.fillStyle(color, 1);
+    g.fillCircle(radius, radius, radius);
+    g.lineStyle(3, 0x1f2937, 0.95);
+    g.strokeCircle(radius, radius, radius - 1);
+    g.fillStyle(0xffffff, 0.9);
+    g.fillCircle(radius - Math.floor(radius * 0.28), radius - Math.floor(radius * 0.18), Math.max(3, Math.floor(radius * 0.12)));
+    g.fillCircle(radius + Math.floor(radius * 0.28), radius - Math.floor(radius * 0.18), Math.max(3, Math.floor(radius * 0.12)));
+    g.fillStyle(0x111827, 1);
+    g.fillCircle(radius - Math.floor(radius * 0.26), radius - Math.floor(radius * 0.16), Math.max(2, Math.floor(radius * 0.06)));
+    g.fillCircle(radius + Math.floor(radius * 0.26), radius - Math.floor(radius * 0.16), Math.max(2, Math.floor(radius * 0.06)));
+    g.lineStyle(2, 0x111827, 0.9);
+    g.beginPath();
+    g.moveTo(radius - Math.floor(radius * 0.2), radius + Math.floor(radius * 0.18));
+    g.lineTo(radius, radius + Math.floor(radius * 0.28));
+    g.lineTo(radius + Math.floor(radius * 0.2), radius + Math.floor(radius * 0.18));
+    g.strokePath();
+
+    g.generateTexture(textureKey, size, size);
+    g.destroy();
   }
 
   private getFeel(): MatterFeelPreset {
@@ -530,15 +1118,12 @@ export default class MainScene extends Phaser.Scene {
     return cfg;
   }
 
-  private getElementConfigByTextureKey(textureKey: string) {
-    const cfg = ZJU_ELEMENTS.find((x) => x.textureKey === textureKey);
-    if (!cfg) {
-      throw new Error(`Invalid texture key: ${textureKey}`);
-    }
-    return cfg;
+  private getVariantByIdOrFallback(level: number, variantId: string) {
+    return getVariantById(variantId, this.catArtPackId) ?? getDefaultVariantForLevel(level, this.catArtPackId);
   }
 
   private getUnlockedDropLevelByScore(score: number) {
+
     let unlockedLevel = 1;
 
     for (let i = DROP_LEVEL_UNLOCK_SCORES.length - 1; i >= 0; i -= 1) {
@@ -548,7 +1133,7 @@ export default class MainScene extends Phaser.Scene {
       }
     }
 
-    return Phaser.Math.Clamp(Math.max(2, unlockedLevel), 2, MAX_LEVEL);
+    return Phaser.Math.Clamp(Math.max(2, unlockedLevel), 2, Math.min(MAX_LEVEL, 8));
   }
 
   private pickNextDropLevel(maxLevel: number) {
@@ -557,8 +1142,9 @@ export default class MainScene extends Phaser.Scene {
     let totalWeight = 0;
 
     for (let level = 1; level <= cappedLevel; level += 1) {
-      const distance = cappedLevel - level;
-      const weight = Math.pow(0.72, distance);
+      const lowPeak = Math.pow(0.66, level - 1);
+      const highPeak = 0.58 * Math.pow(0.72, cappedLevel - level);
+      const weight = lowPeak + highPeak;
       weights.push(weight);
       totalWeight += weight;
     }
@@ -577,13 +1163,16 @@ export default class MainScene extends Phaser.Scene {
   private rollAndSetNextQueuedElement() {
     const unlockedLevel = this.getUnlockedDropLevelByScore(this.currentScore);
     const nextLevel = this.pickNextDropLevel(unlockedLevel);
-    const nextCfg = this.getElementConfig(nextLevel);
-    this.queuedElementType = nextCfg.textureKey;
+    const nextQueued = this.buildQueuedElement(nextLevel);
+    this.queuedElement = nextQueued;
 
     const payload = {
-      textureKey: nextCfg.textureKey,
-      level: nextCfg.level,
-      name: nextCfg.name,
+      level: nextQueued.level,
+      name: nextQueued.name,
+      variantId: nextQueued.variant.id,
+      sourceFile: nextQueued.variant.sourceFile,
+      previewSrc: this.getVariantPreviewSrc(nextQueued.variant),
+      kind: nextQueued.variant.kind,
     };
 
     this.events.emit('nextElementChanged', payload);
@@ -592,6 +1181,7 @@ export default class MainScene extends Phaser.Scene {
   }
 
   private computeDensityForLevel(level: number, feel: MatterFeelPreset) {
+
     return (
       BASE_ELEMENT_DENSITY *
       feel.densityScale *
@@ -599,33 +1189,48 @@ export default class MainScene extends Phaser.Scene {
     );
   }
 
-  private spawnElement(level: number, x: number, y: number, feel?: MatterFeelPreset): MatterImage {
+  private spawnElement(level: number, x: number, y: number, feel?: MatterFeelPreset, variant?: CatVariantConfig): MatterImage {
     const actualFeel = feel ?? this.getFeel();
     const cfg = this.getElementConfig(level);
+    const chosenVariant = variant ?? this.buildQueuedElement(level).variant;
+    const effectiveRadius = this.getEffectiveRadius(level, chosenVariant);
+    const dynamicDensity = this.computeDensityForLevel(level, actualFeel);
 
-    const image = this.matter.add.image(x, y, cfg.textureKey, undefined, {
-      restitution: actualFeel.restitution,
+    const physicsOptions = {
+      shape: { type: 'circle', radius: effectiveRadius },
       friction: actualFeel.friction,
       frictionAir: actualFeel.frictionAir,
       frictionStatic: actualFeel.frictionStatic,
-      density: this.computeDensityForLevel(level, actualFeel),
+      restitution: actualFeel.restitution,
+      density: dynamicDensity,
       label: `zju-level-${level}`,
-    });
+    };
 
-    image.setCircle(cfg.radius);
+    const image = this.matter.add.sprite(
+      x,
+      y,
+      this.getRenderedTextureKey(chosenVariant.id),
+      undefined,
+      physicsOptions,
+    ) as MatterImage;
 
-    const dynamicDensity = this.computeDensityForLevel(level, actualFeel);
+    this.applyVariantVisual(image, level, chosenVariant);
+
+    image.setBounce(actualFeel.restitution);
+    image.setFriction(actualFeel.friction, actualFeel.frictionAir, actualFeel.frictionStatic);
     image.setDensity(dynamicDensity);
-    this.lastSpawnDensity = dynamicDensity;
-
-    image.setDisplaySize(cfg.radius * 2, cfg.radius * 2);
+    image.setDepth(20);
     image.setDataEnabled();
     image.setData('level', level);
-    image.setData('radius', cfg.radius);
+    image.setData('variantId', chosenVariant.id);
+    image.setData('sourceFile', chosenVariant.sourceFile);
+    image.setData('variantKind', chosenVariant.kind);
+    image.setData('radius', effectiveRadius);
     image.setData('merged', false);
+    image.setData('isMerging', false);
     image.setData('isSettled', false);
 
-    this.attachElementLabel(image, cfg.name, cfg.radius);
+    this.lastSpawnDensity = dynamicDensity;
 
     if (level > this.maxLevelReached) {
       this.maxLevelReached = level;
@@ -652,9 +1257,7 @@ export default class MainScene extends Phaser.Scene {
     if (this.isGameOver) return;
 
     const pairs = event.pairs as Array<{ bodyA: MatterJS.BodyType; bodyB: MatterJS.BodyType }>;
-
     const reservedBodyIds = new Set<number>();
-    const mergeQueue: MergeRequest[] = [];
 
     for (const pair of pairs) {
       const bodyA = pair.bodyA;
@@ -663,11 +1266,16 @@ export default class MainScene extends Phaser.Scene {
       this.markElementSettled(bodyA);
       this.markElementSettled(bodyB);
 
-      const a = bodyA.gameObject as MatterImage | undefined;
-      const b = bodyB.gameObject as MatterImage | undefined;
+      if (!bodyA.gameObject || !bodyB.gameObject) {
+        continue;
+      }
 
-      if (!a || !b || !a.active || !b.active) continue;
+      const a = bodyA.gameObject as MatterImage;
+      const b = bodyB.gameObject as MatterImage;
+
+      if (!a.active || !b.active) continue;
       if (a.getData('merged') || b.getData('merged')) continue;
+      if (a.getData('isMerging') || b.getData('isMerging')) continue;
 
       const levelA = Number(a.getData('level'));
       const levelB = Number(b.getData('level'));
@@ -678,27 +1286,42 @@ export default class MainScene extends Phaser.Scene {
       const idB = bodyB.id;
       if (reservedBodyIds.has(idA) || reservedBodyIds.has(idB)) continue;
 
+      a.setData('isMerging', true);
+      b.setData('isMerging', true);
       reservedBodyIds.add(idA);
       reservedBodyIds.add(idB);
 
-      mergeQueue.push({
-        a,
-        b,
+      this.pendingMerges.push({
+        bodyA,
+        bodyB,
         nextLevel: levelA + 1,
-        x: (bodyA.position.x + bodyB.position.x) / 2,
-        y: (bodyA.position.y + bodyB.position.y) / 2,
       });
     }
+  }
 
-    for (const merge of mergeQueue) {
+  private processPendingMerges() {
+    if (this.pendingMerges.length === 0 || this.isGameOver) {
+      this.pendingMerges = [];
+      return;
+    }
+
+    const merges = this.pendingMerges;
+    this.pendingMerges = [];
+
+    for (const merge of merges) {
       this.executeMerge(merge);
     }
   }
 
   private executeMerge(merge: MergeRequest) {
-    const { a, b, nextLevel, x, y } = merge;
+    const { bodyA, bodyB, nextLevel } = merge;
+    const a = bodyA.gameObject as MatterImage | undefined;
+    const b = bodyB.gameObject as MatterImage | undefined;
 
-    if (!a.active || !b.active) return;
+    if (!a || !b || !a.active || !b.active) return;
+
+    const x = (bodyA.position.x + bodyB.position.x) / 2;
+    const y = (bodyA.position.y + bodyB.position.y) / 2;
 
     a.setData('merged', true);
     b.setData('merged', true);
@@ -706,8 +1329,10 @@ export default class MainScene extends Phaser.Scene {
     a.destroy();
     b.destroy();
 
-    const merged = this.spawnElement(nextLevel, x, y - 2);
+    const nextVariant = this.buildQueuedElement(nextLevel, String(a.getData('variantId') ?? '')).variant;
+    const merged = this.spawnElement(nextLevel, x, y - 2, undefined, nextVariant);
     merged.setVelocity((Math.random() - 0.5) * 1.2, -4.2);
+    this.playMergePopVisual(nextLevel, nextVariant.id, x, y - 2);
 
     const now = this.time.now;
     if (now - this.lastMergeTimestamp < COMBO_WINDOW_MS) {
@@ -737,26 +1362,60 @@ export default class MainScene extends Phaser.Scene {
     this.emitDebugState();
   }
 
+  private playMergePopVisual(level: number, variantId: string, x: number, y: number) {
+    const cfg = this.getElementConfig(level);
+    const variant = this.getVariantByIdOrFallback(level, variantId);
+    const pop = this.add.sprite(x, y, this.getRenderedTextureKey(variantId));
+    this.applyVariantVisual(pop, level, variant);
+    pop.setDepth(45);
+    pop.setAlpha(0.88);
+    pop.setScale(0.5);
+
+    this.tweens.add({
+      targets: pop,
+      scale: 1,
+      alpha: 0,
+      duration: 250,
+      ease: 'Back.Out',
+      onComplete: () => pop.destroy(),
+    });
+  }
   private showComboFloatingText(x: number, y: number, comboCount: number, bonusScore: number) {
+
     if (comboCount <= 1) return;
 
-    const text = this.add.text(x - 28, y - 24, `Combo x${comboCount}\n+${bonusScore}`, {
-      color: '#fef08a',
-      fontFamily: 'monospace',
-      fontSize: '14px',
+    const text = this.add.text(x - 22, y - 26, `Combo x${comboCount}\n+${bonusScore}`, {
+      color: '#fff7ed',
+      fontFamily: 'Arial Rounded MT Bold, Trebuchet MS, sans-serif',
+      fontSize: '15px',
       align: 'center',
-      stroke: '#1e293b',
-      strokeThickness: 3,
+      stroke: '#7c2d12',
+      strokeThickness: 5,
+      lineSpacing: -2,
     });
     text.setDepth(50);
+    text.setShadow(0, 4, '#fb923c', 12, false, true);
+    text.setScale(0.72);
+    text.setAlpha(0);
 
     this.tweens.add({
       targets: text,
-      y: y - 58,
-      alpha: 0,
-      duration: 420,
-      ease: 'Cubic.Out',
-      onComplete: () => text.destroy(),
+      y: y - 62,
+      alpha: 1,
+      scale: 1.06,
+      duration: 220,
+      ease: 'Back.Out',
+      onComplete: () => {
+        this.tweens.add({
+          targets: text,
+          y: y - 78,
+          alpha: 0,
+          scale: 0.92,
+          duration: 180,
+          ease: 'Cubic.In',
+          onComplete: () => text.destroy(),
+        });
+      },
     });
   }
 
@@ -782,34 +1441,22 @@ export default class MainScene extends Phaser.Scene {
     if (comboCount < 2) return;
 
     let title = 'COMBO x' + comboCount;
-    let color = '#67e8f9';
+    let color = '#fde68a';
     let size = 34;
-    let stroke = '#0f172a';
-    let glow = color;
-    let fontFamily = 'Verdana';
-
-    if (this.comboTheme === 'pixel') {
-      fontFamily = 'monospace';
-      stroke = '#020617';
-      glow = '#22d3ee';
-    } else if (this.comboTheme === 'neon') {
-      fontFamily = 'Trebuchet MS';
-      stroke = '#0a0a1f';
-      glow = '#f472b6';
-    } else {
-      fontFamily = 'KaiTi';
-      stroke = '#1e293b';
-      glow = '#93c5fd';
-    }
+    let stroke = '#7c2d12';
+    let glow = '#fdba74';
+    let fontFamily = 'Arial Rounded MT Bold, Trebuchet MS, sans-serif';
 
     if (comboCount >= 6) {
       title = 'MEGA COMBO x' + comboCount;
-      color = this.comboTheme === 'campus' ? '#60a5fa' : '#f472b6';
+      color = '#f9a8d4';
       size = 44;
+      glow = '#f472b6';
     } else if (comboCount >= 4) {
       title = 'SUPER COMBO x' + comboCount;
-      color = this.comboTheme === 'campus' ? '#34d399' : '#facc15';
+      color = '#fdba74';
       size = 39;
+      glow = '#fb923c';
     }
 
     const centerX = this.scale.width * 0.5;
@@ -823,37 +1470,36 @@ export default class MainScene extends Phaser.Scene {
       color,
       align: 'center',
       stroke,
-      strokeThickness: this.comboTheme === 'pixel' ? 10 : 8,
+      strokeThickness: 9,
       lineSpacing: 6,
     });
     banner.setOrigin(0.5, 0.5);
     banner.setDepth(120);
     banner.setAlpha(0);
-    banner.setShadow(0, 0, glow, this.comboTheme === 'neon' ? 28 : 18, true, true);
+    banner.setShadow(0, 6, glow, 18, false, true);
 
     const maxBannerWidth = this.scale.width * 0.86;
     const fitRatio = banner.width > maxBannerWidth ? maxBannerWidth / banner.width : 1;
-    const startScale = (this.comboTheme === 'pixel' ? 0.52 : 0.58) * fitRatio;
-    const peakScale = 1.06 * fitRatio;
-    const endScale = 0.96 * fitRatio;
+    const startScale = 0.5 * fitRatio;
+    const peakScale = 1.12 * fitRatio;
+    const endScale = 0.94 * fitRatio;
     banner.setScale(startScale);
 
     this.tweens.add({
       targets: banner,
-      alpha: 0.9,
+      alpha: 0.98,
       scale: peakScale,
       y: centerY,
-      duration: 150,
+      duration: 180,
       ease: 'Back.Out',
       onComplete: () => {
         this.tweens.add({
           targets: banner,
           alpha: 0,
           scale: endScale,
-          y: centerY - 20,
-          duration: 460,
-          delay: 120,
-          ease: 'Cubic.Out',
+          y: centerY - 18,
+          duration: 170,
+          ease: 'Cubic.In',
           onComplete: () => banner.destroy(),
         });
       },
@@ -873,6 +1519,10 @@ export default class MainScene extends Phaser.Scene {
     return lines.slice(0, 2).join('\n');
   }
 
+  private getPilotBadgeText(variantId: string | null | undefined) {
+    return variantId ? PILOT_VARIANT_BADGES[variantId] ?? null : null;
+  }
+
   private attachElementLabel(image: MatterImage, name: string, radius: number) {
     const fontSize = Phaser.Math.Clamp(Math.floor(radius * 0.45), 9, 24);
     const label = this.add.text(image.x, image.y, this.formatElementLabel(name), {
@@ -890,9 +1540,30 @@ export default class MainScene extends Phaser.Scene {
 
     image.setData('labelRef', label);
 
+    const pilotBadgeText = this.getPilotBadgeText(String(image.getData('variantId') ?? ''));
+    if (pilotBadgeText) {
+      const badge = this.add.text(image.x, image.y, pilotBadgeText, {
+        fontFamily: 'monospace',
+        fontSize: `${Math.max(10, Math.floor(radius * 0.34))}px`,
+        color: '#7c2d12',
+        fontStyle: 'bold',
+        stroke: '#fff7ed',
+        strokeThickness: 3,
+        backgroundColor: '#fde68a',
+        padding: { left: 4, right: 4, top: 1, bottom: 1 },
+      });
+      badge.setOrigin(0.5, 0.5);
+      badge.setDepth(22);
+      image.setData('pilotBadgeRef', badge);
+    }
+
     image.once('destroy', () => {
       if (label.active) {
         label.destroy();
+      }
+      const badge = image.getData('pilotBadgeRef') as Phaser.GameObjects.Text | undefined;
+      if (badge?.active) {
+        badge.destroy();
       }
     });
   }
@@ -912,9 +1583,52 @@ export default class MainScene extends Phaser.Scene {
 
       label.setPosition(obj.x, obj.y);
       label.setRotation(obj.rotation);
+
+      const shell = obj.getData('shellRef') as Phaser.GameObjects.Arc | undefined;
+      if (shell?.active) {
+        const radius = Number(obj.getData('radius')) || 0;
+        shell.setPosition(obj.x, obj.y);
+        shell.setDepth(Math.max(0, obj.depth - 1));
+        shell.setRadius(radius);
+      }
+
+      const badge = obj.getData('pilotBadgeRef') as Phaser.GameObjects.Text | undefined;
+      if (badge?.active) {
+        const radius = Number(obj.getData('radius')) || 0;
+        badge.setPosition(obj.x + radius * 0.46, obj.y - radius * 0.48);
+      }
     }
   }
 
+  private syncPilotBadgeForPreview(level: number, variantId: string) {
+    const badgeText = this.getPilotBadgeText(variantId);
+    if (!badgeText) {
+      if (this.aimPreviewBadge) {
+        this.aimPreviewBadge.destroy();
+        this.aimPreviewBadge = undefined;
+      }
+      return;
+    }
+
+    if (!this.aimPreviewBadge) {
+      this.aimPreviewBadge = this.add.text(0, 0, badgeText, {
+        fontFamily: 'monospace',
+        fontSize: `${Math.max(11, Math.floor(this.getElementConfig(level).radius * 0.34))}px`,
+        color: '#7c2d12',
+        fontStyle: 'bold',
+        stroke: '#fff7ed',
+        strokeThickness: 3,
+        backgroundColor: '#fde68a',
+        padding: { left: 4, right: 4, top: 1, bottom: 1 },
+      });
+      this.aimPreviewBadge.setOrigin(0.5, 0.5);
+      this.aimPreviewBadge.setDepth(31);
+    }
+
+    this.aimPreviewBadge.setText(badgeText);
+    const radius = this.getElementConfig(level).radius;
+    this.aimPreviewBadge.setPosition(this.aimX + radius * 0.46, DROP_SPAWN_Y - radius * 0.48);
+  }
   private getMinSettledTopY(): number | null {
     let minY = Number.POSITIVE_INFINITY;
 
@@ -972,29 +1686,29 @@ export default class MainScene extends Phaser.Scene {
     let tipFont = 'monospace';
 
     if (this.comboTheme === 'pixel') {
-      panelColor = 0x111827;
-      panelStroke = 0x22d3ee;
-      titleColor = '#f97316';
-      titleGlow = '#f97316';
-      titleFont = 'monospace';
-      tipColor = '#67e8f9';
-      tipFont = 'monospace';
+      panelColor = 0xfff7ed;
+      panelStroke = 0xfb923c;
+      titleColor = '#fb923c';
+      titleGlow = '#fdba74';
+      titleFont = 'Arial Rounded MT Bold';
+      tipColor = '#7c2d12';
+      tipFont = 'Trebuchet MS';
     } else if (this.comboTheme === 'neon') {
-      panelColor = 0x090b24;
-      panelStroke = 0xf472b6;
-      titleColor = '#f472b6';
-      titleGlow = '#f472b6';
-      titleFont = 'Trebuchet MS';
-      tipColor = '#c4b5fd';
+      panelColor = 0xfff1f2;
+      panelStroke = 0xfb7185;
+      titleColor = '#fb7185';
+      titleGlow = '#f9a8d4';
+      titleFont = 'Arial Rounded MT Bold';
+      tipColor = '#9f1239';
       tipFont = 'Trebuchet MS';
     } else {
-      panelColor = 0x10243e;
-      panelStroke = 0x60a5fa;
-      titleColor = '#34d399';
-      titleGlow = '#60a5fa';
-      titleFont = 'KaiTi';
-      tipColor = '#bfdbfe';
-      tipFont = 'KaiTi';
+      panelColor = 0xfffbeb;
+      panelStroke = 0xf59e0b;
+      titleColor = '#f59e0b';
+      titleGlow = '#fdba74';
+      titleFont = 'Arial Rounded MT Bold';
+      tipColor = '#78350f';
+      tipFont = 'Trebuchet MS';
     }
 
     const panel = this.add.rectangle(
@@ -1003,17 +1717,17 @@ export default class MainScene extends Phaser.Scene {
       Math.min(360, this.scale.width - 28),
       138,
       panelColor,
-      0.8,
+      0.92,
     );
-    panel.setStrokeStyle(2, panelStroke, 0.68);
+    panel.setStrokeStyle(3, panelStroke, 0.92);
 
     const title = this.add.text(centerX, centerY - 14, 'GAME OVER', {
       fontFamily: titleFont,
-      fontSize: '44px',
+      fontSize: '46px',
       fontStyle: 'bold',
       color: titleColor,
       stroke: titleStroke,
-      strokeThickness: 8,
+      strokeThickness: 10,
     });
     title.setOrigin(0.5, 0.5);
     title.setShadow(0, 0, titleGlow, this.comboTheme === 'neon' ? 24 : 18, true, true);
@@ -1040,7 +1754,12 @@ export default class MainScene extends Phaser.Scene {
     if (this.isGameOver) return;
     this.isGameOver = true;
     this.isAiming = false;
+    this.activeProp = 'none';
+    this.propImmunityTimer = 0;
+    this.pendingMerges = [];
+    this.canDrop = false;
     this.clearAimVisuals();
+    this.game.events.emit('zju:activePropChanged', { activeProp: this.activeProp });
     this.showGameOverBanner();
 
     const payload: GameOverPayload = {
@@ -1075,9 +1794,7 @@ export default class MainScene extends Phaser.Scene {
   }
 
   private emitDebugState() {
-    const next = this.queuedElementType
-      ? this.getElementConfigByTextureKey(this.queuedElementType)
-      : null;
+    const next = this.queuedElement;
 
     const payload = {
       score: this.currentScore,
@@ -1092,12 +1809,17 @@ export default class MainScene extends Phaser.Scene {
       dropCooldownMs: DROP_COOLDOWN_MS,
       activeProp: this.activeProp,
       propImmunityTimer: this.propImmunityTimer,
+      catRenderTheme: this.catRenderTheme,
+      catArtPackId: this.catArtPackId,
       lastSpawnDensity: this.lastSpawnDensity,
       queuedElement: next
         ? {
             level: next.level,
-            textureKey: next.textureKey,
             name: next.name,
+            variantId: next.variant.id,
+            sourceFile: next.variant.sourceFile,
+            previewSrc: this.getVariantPreviewSrc(next.variant),
+            kind: next.variant.kind,
           }
         : null,
     };

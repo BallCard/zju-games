@@ -1,6 +1,6 @@
-import { useEffect, useRef } from 'react';
+﻿import { useEffect, useRef } from 'react';
 import Phaser from 'phaser';
-import { createGameConfig, type FeelPresetName } from './GameConfig';
+import { createGameConfig, type CatArtPackId, type FeelPresetName } from './GameConfig';
 
 const phaserGlobal = globalThis as typeof globalThis & {
   __zjuPhaserGame?: Phaser.Game | null;
@@ -12,6 +12,10 @@ export type PropEventName =
   | 'zju:activatePropHammer'
   | 'zju:activatePropBomb'
   | 'zju:setComboTheme'
+  | 'zju:setCatRenderTheme'
+  | 'zju:setCatArtPack'
+  | 'zju:forceVariantPreview'
+  | 'zju:spawnVariantPilot'
   | 'zju:forceGameOver';
 
 export function emitGameEvent(eventName: PropEventName, payload?: unknown) {
@@ -29,9 +33,12 @@ export interface GameOverPayload {
 }
 
 export interface NextElementPayload {
-  textureKey: string;
   level: number;
   name: string;
+  variantId: string;
+  sourceFile: string;
+  previewSrc: string;
+  kind?: 'static' | 'animated-reserved';
 }
 
 export interface ComboPayload {
@@ -58,9 +65,13 @@ export interface DebugStatePayload {
   propImmunityTimer?: number;
   queuedElement: {
     level: number;
-    textureKey: string;
     name: string;
+    variantId: string;
+    sourceFile: string;
+    previewSrc: string;
+    kind?: 'static' | 'animated-reserved';
   } | null;
+  catArtPackId?: CatArtPackId;
 }
 
 interface PhaserGameProps {

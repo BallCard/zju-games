@@ -6,12 +6,20 @@ import PhaserGame, {
   type GameOverPayload,
   type NextElementPayload,
 } from './PhaserGame';
-import { DROP_LEVEL_UNLOCK_SCORES, type FeelPresetName } from './GameConfig';
+import { CAT_ART_PACK_OPTIONS, DEFAULT_CAT_ART_PACK, DROP_LEVEL_UNLOCK_SCORES, type CatArtPackId, type FeelPresetName } from './GameConfig';
 
 const PRESETS: FeelPresetName[] = ['bouncy', 'balanced', 'heavy'];
 const TUTORIAL_KEY = 'zju-merge-tutorial-v1-seen';
+const SETTINGS_KEYS = {
+  feel: 'zju-merge-feel',
+  comboTheme: 'zju-merge-combo-theme',
+  catRenderTheme: 'zju-merge-cat-render-theme',
+  catArtPackId: 'zju-merge-art-pack',
+  showDebug: 'zju-merge-show-debug',
+} as const;
 
 type ComboTheme = 'pixel' | 'neon' | 'campus';
+type CatRenderTheme = 'transparent' | 'cream-card';
 
 const TUTORIAL_STEPS = [
   {
@@ -28,21 +36,6 @@ const TUTORIAL_STEPS = [
   },
 ] as const;
 
-const NEXT_COLORS = [
-  '#7dd3fc',
-  '#60a5fa',
-  '#818cf8',
-  '#a78bfa',
-  '#c084fc',
-  '#f472b6',
-  '#fb7185',
-  '#fb923c',
-  '#facc15',
-  '#4ade80',
-  '#2dd4bf',
-  '#22d3ee',
-];
-
 const PROP_SKINS = {
   shake: '/props/shake.png',
   hammer: '/props/hammer.png',
@@ -50,13 +43,21 @@ const PROP_SKINS = {
   refresh: '/props/refresh.png',
 } as const;
 
+const PILOT_VARIANT_BUTTONS = [
+  { label: 'spawn-p10', level: 10, variantId: 'cat-l10-memev1-1' },
+  { label: 'spawn-p11', level: 11, variantId: 'cat-l11-memev1-1' },
+  { label: 'spawn-p12', level: 12, variantId: 'cat-l12-memev1-1' },
+] as const;
+
 function FloatingToolButton({
   label,
+  emoji,
   onClick,
   active = false,
   iconUrl,
 }: {
   label: string;
+  emoji: string;
   onClick: () => void;
   active?: boolean;
   iconUrl?: string;
@@ -67,37 +68,52 @@ function FloatingToolButton({
     <button
       type="button"
       onClick={onClick}
-      className={`relative h-12 w-12 overflow-hidden rounded-full border text-[10px] font-semibold backdrop-blur transition bg-cover bg-center ${
+      className={`relative flex h-14 w-14 flex-col items-center justify-center overflow-hidden rounded-[1.4rem] border backdrop-blur-md transition duration-150 bg-cover bg-center ${
         active
-          ? 'border-amber-300 shadow-[0_0_0_2px_rgba(252,211,77,0.35)]'
-          : 'border-white/20'
-      } ${hasIcon ? 'text-white' : 'bg-slate-900/60 text-slate-100'}`}
+          ? 'border-amber-300 bg-amber-100/80 shadow-[0_0_0_3px_rgba(251,191,36,0.35),0_14px_30px_rgba(180,83,9,0.22)] -translate-y-0.5'
+          : 'border-slate-900/10 bg-white/45 shadow-[0_10px_24px_rgba(15,23,42,0.12)]'
+      }`}
       style={
         hasIcon
           ? {
-              backgroundImage: `linear-gradient(rgba(2,6,23,0.18), rgba(2,6,23,0.18)), url(${iconUrl})`,
+              backgroundImage: `linear-gradient(rgba(255,248,235,0.68), rgba(255,244,214,0.72)), url(${iconUrl})`,
             }
-          : undefined
+          : {
+              backgroundImage: 'linear-gradient(180deg, rgba(255,250,240,0.95), rgba(250,232,200,0.88))',
+            }
       }
     >
-      <span className="absolute inset-0 flex items-center justify-center px-1 text-center leading-tight drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]">
+      <span className="pointer-events-none text-[22px] leading-none drop-shadow-[0_1px_0_rgba(255,255,255,0.7)]">{emoji}</span>
+      <span className="pointer-events-none mt-1 text-[9px] font-black uppercase leading-none tracking-[0.08em] text-[#5D4037] drop-shadow-[0_1px_0_rgba(255,255,255,0.65)]">
         {label}
       </span>
     </button>
   );
 }
 
-function NextBallIcon({ nextElement }: { nextElement: NextElementPayload | null }) {
+function NextBallIcon({
+  nextElement,
+  renderTheme,
+}: {
+  nextElement: NextElementPayload | null;
+  renderTheme: CatRenderTheme;
+}) {
   const level = nextElement?.level ?? 1;
-  const color = NEXT_COLORS[(level - 1) % NEXT_COLORS.length];
+  const src = nextElement?.previewSrc ?? `/assets/cats/cat-${level}.png`;
+  const shellClass =
+    renderTheme === 'cream-card'
+      ? 'border-slate-900/10 bg-[linear-gradient(180deg,rgba(255,248,238,0.96),rgba(248,231,202,0.9))] shadow-[0_10px_24px_rgba(15,23,42,0.14)]'
+      : 'border-white/20 bg-slate-900/55 shadow-[0_8px_18px_rgba(15,23,42,0.2)]';
 
   return (
-    <div className="relative flex h-11 w-11 items-center justify-center rounded-full border border-white/20 bg-slate-900/65">
-      <div
-        className="h-7 w-7 rounded-full"
-        style={{
-          background: `radial-gradient(circle at 30% 28%, rgba(255,255,255,0.52), transparent 35%), ${color}`,
-        }}
+    <div
+      className={`relative flex h-12 w-12 items-center justify-center overflow-hidden rounded-[1.25rem] border ${shellClass}`}
+    >
+      <img
+        src={src}
+        alt={`Next cat level ${level}`}
+        className={renderTheme === 'cream-card' ? 'h-9 w-9 object-contain' : 'h-10 w-10 object-contain drop-shadow-[0_4px_10px_rgba(255,255,255,0.16)]'}
+        draggable={false}
       />
     </div>
   );
@@ -145,9 +161,9 @@ function HeaderProgressShell({ score }: { score: number }) {
         <span>Lv{progress.currentLevel}</span>
         <span>Lv{progress.nextLevel}</span>
       </div>
-      <div className="relative h-3 w-full rounded-full bg-slate-700/80">
+      <div className="relative h-3.5 w-full overflow-hidden rounded-full bg-slate-700/35 ring-1 ring-slate-900/8">
         <div
-          className="h-full rounded-full bg-gradient-to-r from-cyan-300 via-sky-300 to-violet-400 transition-all duration-300"
+          className="h-full rounded-full bg-gradient-to-r from-[#7dd3fc] via-[#a5b4fc] to-[#f9a8d4] transition-all duration-300"
           style={{ width: fillWidth }}
         />
         <span
@@ -165,17 +181,19 @@ interface ScoreBurst {
 }
 
 export default function App() {
-  const [feel, setFeel] = useState<FeelPresetName>('balanced');
+  const [feel, setFeel] = useState<FeelPresetName>(() => (localStorage.getItem(SETTINGS_KEYS.feel) as FeelPresetName) || 'balanced');
   const [sessionKey, setSessionKey] = useState(0);
   const [score, setScore] = useState(0);
   const [gameOver, setGameOver] = useState<GameOverPayload | null>(null);
   const [nextElement, setNextElement] = useState<NextElementPayload | null>(null);
   const [combo, setCombo] = useState<ComboPayload | null>(null);
   const [debugState, setDebugState] = useState<DebugStatePayload | null>(null);
-  const [showDebug, setShowDebug] = useState(false);
+  const [showDebug, setShowDebug] = useState(() => localStorage.getItem(SETTINGS_KEYS.showDebug) === '1');
   const [tutorialStep, setTutorialStep] = useState<number | null>(null);
   const [scoreBursts, setScoreBursts] = useState<ScoreBurst[]>([]);
-  const [comboTheme, setComboTheme] = useState<ComboTheme>('pixel');
+  const [comboTheme, setComboTheme] = useState<ComboTheme>(() => (localStorage.getItem(SETTINGS_KEYS.comboTheme) as ComboTheme) || 'pixel');
+  const [catRenderTheme, setCatRenderTheme] = useState<CatRenderTheme>(() => (localStorage.getItem(SETTINGS_KEYS.catRenderTheme) as CatRenderTheme) || 'cream-card');
+  const [catArtPackId, setCatArtPackId] = useState<CatArtPackId>(() => (localStorage.getItem(SETTINGS_KEYS.catArtPackId) as CatArtPackId) || DEFAULT_CAT_ART_PACK);
 
   useEffect(() => {
     const seen = localStorage.getItem(TUTORIAL_KEY);
@@ -183,8 +201,27 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    localStorage.setItem(SETTINGS_KEYS.comboTheme, comboTheme);
     emitGameEvent('zju:setComboTheme', { theme: comboTheme });
   }, [comboTheme]);
+
+  useEffect(() => {
+    localStorage.setItem(SETTINGS_KEYS.catRenderTheme, catRenderTheme);
+    emitGameEvent('zju:setCatRenderTheme', { theme: catRenderTheme });
+  }, [catRenderTheme]);
+
+  useEffect(() => {
+    localStorage.setItem(SETTINGS_KEYS.catArtPackId, catArtPackId);
+    emitGameEvent('zju:setCatArtPack', { packId: catArtPackId });
+  }, [catArtPackId]);
+
+  useEffect(() => {
+    localStorage.setItem(SETTINGS_KEYS.feel, feel);
+  }, [feel]);
+
+  useEffect(() => {
+    localStorage.setItem(SETTINGS_KEYS.showDebug, showDebug ? '1' : '0');
+  }, [showDebug]);
 
   const handleScoreChange = useCallback((nextScore: number) => {
     setScore(nextScore);
@@ -251,6 +288,11 @@ export default function App() {
   const handleActivateHammer = useCallback(() => emitGameEvent('zju:activatePropHammer'), []);
   const handleActivateBomb = useCallback(() => emitGameEvent('zju:activatePropBomb'), []);
   const handleForceGameOver = useCallback(() => emitGameEvent('zju:forceGameOver'), []);
+  const handleForcePilotVariant = useCallback((level: number, variantId: string) => {
+    setCatArtPackId('meme-chaos-v1');
+    emitGameEvent('zju:setCatArtPack', { packId: 'meme-chaos-v1' });
+    emitGameEvent('zju:spawnVariantPilot', { level, variantId });
+  }, []);
 
   return (
     <main className="fixed inset-0 h-[100dvh] w-screen overflow-hidden bg-slate-950 text-slate-100">
@@ -264,12 +306,12 @@ export default function App() {
 
       <div className="flex h-full w-full flex-col">
         <header className="shrink-0 px-3 pb-2 pt-2">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2.5">
             <div className="flex w-12 shrink-0 items-center justify-center">
-              <NextBallIcon nextElement={nextElement} />
+              <NextBallIcon nextElement={nextElement} renderTheme={catRenderTheme} />
             </div>
 
-            <div className="min-w-0 flex-1 rounded-2xl border border-white/10 bg-slate-900/80 px-3 py-2">
+            <div className="min-w-0 flex-1 rounded-[1.6rem] border border-slate-900/10 bg-[linear-gradient(180deg,rgba(255,250,243,0.96),rgba(245,230,205,0.9))] px-3 py-2.5 shadow-[0_12px_26px_rgba(15,23,42,0.12)]">
               <HeaderProgressShell score={score} />
             </div>
 
@@ -277,7 +319,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={restart}
-                className="h-11 w-11 rounded-full border border-white/20 bg-slate-900/65 text-[11px] font-semibold text-emerald-300"
+                className="h-12 w-12 rounded-[1.25rem] border border-slate-900/10 bg-[linear-gradient(180deg,rgba(255,248,238,0.96),rgba(248,231,202,0.9))] text-[11px] font-black uppercase tracking-[0.08em] text-emerald-700 shadow-[0_10px_24px_rgba(15,23,42,0.14)]"
               >
                 restart
               </button>
@@ -287,8 +329,8 @@ export default function App() {
 
         <section className="relative min-h-0 flex-1">
           <div className="pointer-events-none absolute left-1/2 top-2 z-20 -translate-x-1/2 text-center">
-            <p className="text-3xl font-bold leading-none text-emerald-300">{score}</p>
-            <p className="mt-1 text-[11px] uppercase tracking-[0.28em] text-cyan-200/60">ZJU MERGE</p>
+            <p className="text-[2.15rem] font-black leading-none text-emerald-400 [text-shadow:0_0_8px_rgba(255,255,255,0.85),0_4px_0_rgba(255,255,255,0.55),0_10px_18px_rgba(16,185,129,0.18)]">{score}</p>
+            <p className="mt-1 text-[11px] uppercase tracking-[0.34em] text-[#6c8296]/90">ZJU MERGE</p>
             {scoreBursts.map((burst, idx) => (
               <p
                 key={burst.id}
@@ -318,9 +360,10 @@ export default function App() {
 
           <div className="pointer-events-none absolute inset-y-0 left-3 z-20 flex items-center">
             <div className="pointer-events-auto flex flex-col gap-3">
-              <FloatingToolButton label="shake" iconUrl={PROP_SKINS.shake} onClick={handleUseShake} />
+              <FloatingToolButton label="shake" emoji="📳" iconUrl={PROP_SKINS.shake} onClick={handleUseShake} />
               <FloatingToolButton
                 label="hammer"
+                emoji="🔨"
                 iconUrl={PROP_SKINS.hammer}
                 onClick={handleActivateHammer}
                 active={activeProp === 'hammer'}
@@ -332,11 +375,12 @@ export default function App() {
             <div className="pointer-events-auto flex flex-col gap-3">
               <FloatingToolButton
                 label="bomb"
+                emoji="💣"
                 iconUrl={PROP_SKINS.bomb}
                 onClick={handleActivateBomb}
                 active={activeProp === 'bomb'}
               />
-              <FloatingToolButton label="refresh" iconUrl={PROP_SKINS.refresh} onClick={handleUseRefresh} />
+              <FloatingToolButton label="refresh" emoji="🔄" iconUrl={PROP_SKINS.refresh} onClick={handleUseRefresh} />
             </div>
           </div>
         </section>
@@ -409,11 +453,59 @@ export default function App() {
                 ))}
               </div>
 
+              <div className="flex flex-wrap gap-2">
+                {(['cream-card', 'transparent'] as CatRenderTheme[]).map((theme) => (
+                  <button
+                    key={theme}
+                    type="button"
+                    onClick={() => setCatRenderTheme(theme)}
+                    className={`rounded-full px-3 py-1.5 text-xs font-semibold transition ${
+                      catRenderTheme === theme
+                        ? 'bg-emerald-300 text-slate-950'
+                        : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
+                    }`}
+                  >
+                    cat-{theme}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                {CAT_ART_PACK_OPTIONS.map(({ id, label }) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setCatArtPackId(id)}
+                    className={`rounded-full px-3 py-1.5 text-xs font-semibold transition ${
+                      catArtPackId === id
+                        ? 'bg-amber-300 text-slate-950'
+                        : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
+                    }`}
+                  >{label}</button>
+                ))}
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                {PILOT_VARIANT_BUTTONS.map(({ label, level, variantId }) => (
+                  <button
+                    key={variantId}
+                    type="button"
+                    onClick={() => handleForcePilotVariant(level, variantId)}
+                    className="rounded-full bg-lime-300 px-3 py-1.5 text-xs font-semibold text-slate-950 transition hover:bg-lime-200"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
               <p className="text-xs text-slate-300">
                 Status: <span className="text-amber-300">{statusText}</span> | Next:{' '}
-                <span className="text-violet-300">{nextElement ? `Lv${nextElement.level}` : '-'}</span> | Combo:{' '}
+                <span className="text-violet-300">{nextElement ? `Lv${nextElement.level}` : '-'}</span>
+                {nextElement ? <span className="text-slate-500"> / {nextElement.variantId}</span> : null} | Combo:{' '}
                 <span className="text-pink-300">{combo ? `x${combo.comboCount}` : '-'}</span> | Theme:{' '}
-                <span className="text-cyan-300">{comboTheme}</span>
+                <span className="text-cyan-300">{comboTheme}</span> | Cat:{' '}
+                <span className="text-emerald-300">{catRenderTheme}</span> | Pack:{' '}
+                <span className="text-amber-300">{catArtPackId}</span>
               </p>
 
               {showDebug ? (
@@ -436,24 +528,24 @@ export default function App() {
       </div>
 
       {currentTutorial ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4">
-          <div className="w-full max-w-md rounded-2xl border border-slate-700 bg-slate-900 p-5 text-slate-100 shadow-2xl">
-            <p className="text-sm font-semibold uppercase tracking-wider text-cyan-300">Quick Tutorial</p>
-            <h3 className="mt-2 text-xl font-semibold">{currentTutorial.title}</h3>
-            <p className="mt-3 text-sm leading-6 text-slate-300">{currentTutorial.desc}</p>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(37,24,10,0.45)] px-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-[1.8rem] border border-slate-900/10 bg-[linear-gradient(180deg,rgba(255,251,244,0.98),rgba(247,232,209,0.95))] p-5 text-[#4A3525] shadow-[0_24px_60px_rgba(86,56,24,0.24)]">
+            <p className="text-sm font-black uppercase tracking-[0.18em] text-[#d97706]">Quick Tutorial</p>
+            <h3 className="mt-2 text-xl font-black text-[#5D4037]">{currentTutorial.title}</h3>
+            <p className="mt-3 text-sm leading-6 text-[#6b4f3b]">{currentTutorial.desc}</p>
 
             <div className="mt-5 flex items-center justify-between">
               <button
                 type="button"
                 onClick={closeTutorial}
-                className="rounded-lg bg-slate-700 px-3 py-2 text-sm font-semibold hover:bg-slate-600"
+                className="rounded-xl bg-white/80 px-3 py-2 text-sm font-black uppercase tracking-[0.06em] text-[#5D4037] shadow-[0_8px_18px_rgba(15,23,42,0.08)] hover:bg-[#fff4e1]"
               >
                 skip
               </button>
               <button
                 type="button"
                 onClick={nextTutorialStep}
-                className="rounded-lg bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-300"
+                className="rounded-xl bg-[linear-gradient(180deg,#f9a8d4,#fb923c)] px-4 py-2 text-sm font-black uppercase tracking-[0.06em] text-[#fff7ed] shadow-[0_12px_24px_rgba(251,146,60,0.28)] hover:brightness-105"
               >
                 {tutorialStep === TUTORIAL_STEPS.length - 1 ? 'start' : 'next'}
               </button>
